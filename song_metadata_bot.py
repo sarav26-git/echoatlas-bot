@@ -218,8 +218,11 @@ class SongMetadataFetcher:
 
     @staticmethod
     def _clean_about(text: str) -> str:
+        import re as _re
         text = SongMetadataFetcher._ABOUT_PREFIX.sub('', text).strip()
         text = SongMetadataFetcher._ABOUT_SUFFIX.sub('', text).strip()
+        # Also strip inline "Read More" links Genius appends mid-paragraph
+        text = _re.sub(r'\s*Read More\s*$', '', text, flags=_re.IGNORECASE).strip()
         return text
 
     @staticmethod
@@ -616,7 +619,7 @@ async def handle_song_selection(update: Update, context: ContextTypes.DEFAULT_TY
         artist_line += f" ft. {', '.join(meta['featured_artists'])}"
 
     # Heading: keep the em-dash OUTSIDE any *bold* span to avoid Markdown v1 breakage
-    msg  = "\U0001f3b5 *EchoAtlas* \u2014 Song Metadata\n\n"
+    msg  = "\U0001f3b5 *Here's the Metadata...*\n\n"
     msg += f"\U0001f4cc *Title:* {meta['title']}\n"
     msg += f"\U0001f3a4 *Artist:* {artist_line}\n"
 
@@ -629,8 +632,11 @@ async def handle_song_selection(update: Update, context: ContextTypes.DEFAULT_TY
 
     if meta['description'] != 'No description available':
         desc = meta['description']
-        if len(desc) > 700:
-            desc = desc[:697] + "\u2026"
+        # Show full text; trim at last complete sentence if ending is abrupt
+        if desc and desc.rstrip()[-1] not in ('.', '!', '?'):
+            last = max(desc.rfind('. '), desc.rfind('! '), desc.rfind('? '))
+            if last > len(desc) // 2:
+                desc = desc[:last + 1].strip()
         msg += f"\n\U0001f4d6 *About:*\n_{desc}_\n"
 
     links = []
