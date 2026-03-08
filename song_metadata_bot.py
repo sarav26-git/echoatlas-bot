@@ -239,6 +239,11 @@ class SongMetadataFetcher:
                 timeout=15,
             )
             if resp.status_code != 200:
+                logger.warning(f"_scrape_page: HTTP {resp.status_code} for {song_url}")
+                return out
+            # Cloudflare challenge page — no usable HTML
+            if 'cf-browser-verification' in resp.text or 'cf_clearance' in resp.text:
+                logger.warning(f"_scrape_page: Cloudflare blocked for {song_url}")
                 return out
             soup = BeautifulSoup(resp.text, 'html.parser')
 
@@ -383,16 +388,52 @@ class SongMetadataFetcher:
             if genius_album:
                 result['genius_album'] = genius_album
 
-            # 3. About + Lyrics — scrape both from Genius page in one request
+            # 3. About + Lyrics
+            # Strategy A: scrape the Genius page (works locally; may be blocked by
+            # Cloudflare on cloud servers — we catch that and fall through)
             if song_url:
                 scraped = SongMetadataFetcher._scrape_page(song_url)
                 if scraped.get('about'):
                     result['description'] = scraped['about']
+                    logger.info(f"Genius: about via page scrape for {song_id}")
                 if scraped.get('lyrics'):
                     result['lyrics'] = scraped['lyrics']
                     logger.info(f"Genius: lyrics via page scrape for {song_id}")
+                else:
+                    logger.warning(f"Genius: page scrape returned no lyrics for {song_id} "
+                                   f"(url={song_url!r})")
 
-            # Fallback: API description.plain with aggressive junk stripping
+            # Strategy B: API html format — fetch lyrics as HTML then parse to plain text.
+            # This uses the Bearer token so Cloudflare is bypassed entirely.
+            if not result.get('lyrics'):
+                try:
+                    hresp = requests.get(
+                        f"{GENIUS_API}/songs/{song_id}",
+                        headers=hdrs,
+                        params={'text_format': 'html'},
+                        timeout=10,
+                    )
+                    if hresp.status_code == 200:
+                        hdata = hresp.json().get('response', {}).get('song', {})
+                        lyrics_html = (hdata.get('lyrics') or {}).get('html', '')
+                        if lyrics_html:
+                            parsed = SongMetadataFetcher._html_to_plain(lyrics_html)
+                            if parsed and len(parsed) > 30:
+                                result['lyrics'] = parsed
+                                logger.info(f"Genius: lyrics via API html for {song_id}")
+                        # Also grab about from html if still missing
+                        if not result.get('description'):
+                            desc_html = (hdata.get('description') or {}).get('html', '')
+                            if desc_html:
+                                parsed_desc = SongMetadataFetcher._html_to_plain(desc_html)
+                                cleaned = SongMetadataFetcher._clean_genius_desc(parsed_desc)
+                                if cleaned and len(cleaned) > 40:
+                                    result['description'] = cleaned
+                                    logger.info(f"Genius: about via API html for {song_id}")
+                except Exception as he:
+                    logger.warning(f"Genius API html fallback failed: {he}")
+
+            # Strategy C: plain text description fallback
             if not result.get('description'):
                 desc = (song_details.get('description') or {}).get('plain', '').strip()
                 if desc and desc != '?':
@@ -401,8 +442,8 @@ class SongMetadataFetcher:
                         result['description'] = cleaned
 
             if not result.get('lyrics'):
-                logger.info(
-                    f"Genius: no lyrics retrieved for {song_id} "
+                logger.warning(
+                    f"Genius: ALL lyrics strategies failed for {song_id} "
                     f"(lyrics_state={song_info.get('lyrics_state')!r})"
                 )
 
