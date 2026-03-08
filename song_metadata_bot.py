@@ -204,13 +204,29 @@ class SongMetadataFetcher:
         raw = re.sub(r'(?<!\w)\d{4,6}(?!\w)', '', raw)
         return re.sub(r'\n{3,}', '\n\n', raw).strip()
 
+    # Junk Genius injects before/after About text
+    _ABOUT_PREFIX = re.compile(
+        r'^(Song\s+Bio\s*|\d+\s+contributors?\s*|'
+        r'[\d\s]+(Contributors?|Translations?|Comments?)\s*)+',
+        re.IGNORECASE,
+    )
+    _ABOUT_SUFFIX = re.compile(
+        r'\s*(Expand\s*\+?\d*\s*\d*\s*Share|Read\s*More.*|'
+        r'Ask\s+us.*|Add\s+a\s+comment.*)\s*$',
+        re.IGNORECASE | re.DOTALL,
+    )
+
     @staticmethod
-    def _scrape_about(song_url: str) -> Optional[str]:
-        """
-        Scrape the About section text directly from a Genius song page.
-        Genius renders it inside a <div data-lyrics-container> sibling section
-        or inside a RichText container — we look for several known patterns.
-        """
+    def _clean_about(text: str) -> str:
+        text = SongMetadataFetcher._ABOUT_PREFIX.sub('', text).strip()
+        text = SongMetadataFetcher._ABOUT_SUFFIX.sub('', text).strip()
+        return text
+
+    @staticmethod
+    def _scrape_page(song_url: str) -> dict:
+        """Scrape Genius page for About text AND lyrics in one request."""
+        from bs4 import NavigableString, Tag as BSTag
+        out: dict = {}
         try:
             resp = requests.get(
                 song_url,
@@ -220,40 +236,76 @@ class SongMetadataFetcher:
                 timeout=15,
             )
             if resp.status_code != 200:
-                return None
-
+                return out
             soup = BeautifulSoup(resp.text, 'html.parser')
 
-            # Strategy 1 — look for a <section> or <div> whose class contains
-            # "About" (Genius uses dynamic class names like "AboutSection__Content")
+            # ── About ──────────────────────────────────────────────────────
             for tag in soup.find_all(['section', 'div']):
                 cls = ' '.join(tag.get('class', []))
                 if re.search(r'About\w*Content|SongDescription', cls):
-                    text = tag.get_text(separator=' ', strip=True)
+                    text = SongMetadataFetcher._clean_about(
+                        tag.get_text(separator=' ', strip=True)
+                    )
                     if len(text) > 40:
-                        return text
-
-            # Strategy 2 — find an <h2> or <h3> whose text is "About"
-            #              then collect all paragraphs below it
-            for heading in soup.find_all(['h2', 'h3']):
-                if heading.get_text(strip=True).lower() == 'about':
-                    chunks = []
-                    for sib in heading.find_next_siblings():
-                        if sib.name in ('h2', 'h3'):
+                        out['about'] = text
+                        break
+            if not out.get('about'):
+                for heading in soup.find_all(['h2', 'h3']):
+                    if heading.get_text(strip=True).lower() == 'about':
+                        chunks = []
+                        for sib in heading.find_next_siblings():
+                            if sib.name in ('h2', 'h3'):
+                                break
+                            t = sib.get_text(separator=' ', strip=True)
+                            if t:
+                                chunks.append(t)
+                        text = SongMetadataFetcher._clean_about(' '.join(chunks))
+                        if len(text) > 40:
+                            out['about'] = text
                             break
-                        t = sib.get_text(separator=' ', strip=True)
-                        if t:
-                            chunks.append(t)
-                    text = ' '.join(chunks).strip()
-                    if len(text) > 40:
-                        return text
 
-            return None
+            # ── Lyrics ─────────────────────────────────────────────────────
+            def _walk(node) -> str:
+                buf = []
+                for child in node.children:
+                    if isinstance(child, NavigableString):
+                        buf.append(str(child))
+                    elif isinstance(child, BSTag):
+                        if child.name == 'br':
+                            buf.append('\n')
+                        elif child.name in ('a', 'span', 'b', 'i', 'em', 'strong'):
+                            buf.append(_walk(child))
+                        elif child.name == 'div':
+                            inner = _walk(child).strip()
+                            if inner:
+                                buf.append('\n' + inner + '\n')
+                return ''.join(buf)
+
+            lyrics_divs = soup.find_all('div', {'data-lyrics-container': 'true'})
+            if lyrics_divs:
+                sections = []
+                for div in lyrics_divs:
+                    raw = _walk(div).strip()
+                    raw = re.sub(r'[ \t]{2,}', ' ', raw)
+                    raw = re.sub(r'\n{3,}', '\n\n', raw)
+                    raw = '\n'.join(line.rstrip() for line in raw.splitlines())
+                    if raw:
+                        sections.append(raw)
+                lyrics = '\n\n'.join(sections)
+                lyrics = lyrics.replace('&amp;', '&').replace('&apos;', "'").replace('&#x27;', "'")
+                lyrics = re.sub(r'(?<!\w)\d{4,6}(?!\w)', '', lyrics)
+                lyrics = re.sub(r'\n{3,}', '\n\n', lyrics).strip()
+                if lyrics:
+                    out['lyrics'] = lyrics
         except Exception as e:
-            logger.warning(f"_scrape_about failed: {e}")
-            return None
+            logger.warning(f"_scrape_page failed: {e}")
+        return out
 
-    # Known single-word or short junk lines that Genius prepends to description.plain
+    @staticmethod
+    def _scrape_about(song_url: str) -> Optional[str]:
+        return SongMetadataFetcher._scrape_page(song_url).get('about')
+
+    # Known junk lines in description.plain fallback
     _JUNK_LINE = re.compile(
         r'^(\d+\s+(Contributors?|Translations?|Comments?|Pyccкий)|'
         r'Translations?|Romanization|Read\s*More|'
@@ -266,7 +318,6 @@ class SongMetadataFetcher:
 
     @classmethod
     def _clean_genius_desc(cls, raw: str) -> str:
-        """Strip all leading junk lines from description.plain fallback."""
         lines = raw.splitlines()
         start = 0
         for i, line in enumerate(lines):
@@ -329,14 +380,14 @@ class SongMetadataFetcher:
             if genius_album:
                 result['genius_album'] = genius_album
 
-            # 3. About — scrape directly from the Genius page HTML first.
-            #    The API's description.plain embeds the full page header
-            #    (language list, contributor count, "X Lyrics", "Read More")
-            #    as plain text, so page scraping is more reliable.
+            # 3. About + Lyrics — scrape both from Genius page in one request
             if song_url:
-                about = SongMetadataFetcher._scrape_about(song_url)
-                if about:
-                    result['description'] = about
+                scraped = SongMetadataFetcher._scrape_page(song_url)
+                if scraped.get('about'):
+                    result['description'] = scraped['about']
+                if scraped.get('lyrics'):
+                    result['lyrics'] = scraped['lyrics']
+                    logger.info(f"Genius: lyrics via page scrape for {song_id}")
 
             # Fallback: API description.plain with aggressive junk stripping
             if not result.get('description'):
@@ -345,34 +396,6 @@ class SongMetadataFetcher:
                     cleaned = SongMetadataFetcher._clean_genius_desc(desc)
                     if cleaned:
                         result['description'] = cleaned
-
-            # 4. Lyrics — song.lyrics.plain (newer field)
-            lyrics_plain = (song_details.get('lyrics') or {}).get('plain', '').strip()
-            if lyrics_plain:
-                result['lyrics'] = lyrics_plain
-                logger.info(f"Genius: lyrics via song.lyrics.plain for {song_id}")
-
-            # 5. Lyrics fallback — embed.js
-            if not result.get('lyrics'):
-                try:
-                    eresp = requests.get(f"{GENIUS_API}/songs/{song_id}/embed.js",
-                                         headers=hdrs, timeout=15)
-                    if eresp.status_code == 200:
-                        js = eresp.text
-                        m = re.search(
-                            r'"lyrics_data"\s*:\s*\{[^}]*"body"\s*:\s*"(.*?)"(?=[,}])',
-                            js, re.DOTALL
-                        )
-                        if not m:
-                            m = re.search(r'innerHTML\s*=\s*["\'](<[^"\']+)["\']', js)
-                        if m:
-                            lhtml  = m.group(1).encode('utf-8').decode('unicode_escape')
-                            parsed = SongMetadataFetcher._html_to_plain(lhtml)
-                            if parsed and len(parsed) > 50:
-                                result['lyrics'] = parsed
-                                logger.info(f"Genius: lyrics via embed.js for {song_id}")
-                except Exception as ee:
-                    logger.warning(f"Genius embed.js failed: {ee}")
 
             if not result.get('lyrics'):
                 logger.info(
