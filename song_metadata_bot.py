@@ -719,7 +719,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    if TELEGRAM_TOKEN == 'ENTER_TEL_TOKEN':
+    if TELEGRAM_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN':
         logger.error("Please set your Telegram bot token!")
         print("\n\u26a0\ufe0f  ERROR: Telegram bot token not set!")
         return
