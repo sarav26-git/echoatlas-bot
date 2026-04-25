@@ -34,13 +34,13 @@ USER_AGENT      = "EchoAtlasBot/2.0 (echoatlasbot@telegram.com)"
 
 GENIUS_ACCESS_TOKEN = os.getenv(
     'GENIUS_ACCESS_TOKEN',
-    'Uo3n8_Q2lR-K41bI6qp15eEXner_AqnyAWebuybVsWVTsem6JPwSKNROev89Q0lT'
+    'ENTER_GENIUS_TOKEN'
 )
 GENIUS_API = "https://api.genius.com"
 
 WIKIPEDIA_API  = "https://en.wikipedia.org/w/api.php"
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN',
-                           '8445702412:AAFhO8N_p11gmrhTI6ZURYzv_gmr3eOVOx8')
+                           'ENTER_TEL_TOKEN')
 
 # Keywords that flag a release as a compilation / hits album
 _COMPILATION_RE = re.compile(
@@ -554,8 +554,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\U0001f4d6 Get song meanings from Genius\n"
         "\U0001f4dd View full lyrics with one tap\n"
         "\U0001f517 Direct links to sources\n\n"
-        "\u2728 *Just type any song name!*\n\n"
-        '_Example: "Stay" or "Espresso"_',
+        "\u2728 *Just type any Song name with Artist*\n\n"
+        '_Example: "Wildflower - Billie Eilish"_',
         parse_mode='Markdown',
     )
 
@@ -719,7 +719,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    if TELEGRAM_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN':
+    if TELEGRAM_TOKEN == 'ENTER_TEL_TOKEN':
         logger.error("Please set your Telegram bot token!")
         print("\n\u26a0\ufe0f  ERROR: Telegram bot token not set!")
         return
